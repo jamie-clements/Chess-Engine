@@ -10,6 +10,8 @@ class ChessEngine:
         self.black_king_moved = False
         self.white_rooks_moved = [False, False]  # [queenside, kingside]
         self.black_rooks_moved = [False, False]  # [queenside, kingside]
+        self.move_history = []
+        self.en_passant_target = None
 
     def initalize_board(self):
         # Initalize 8x8 chess board
@@ -71,7 +73,13 @@ class ChessEngine:
                     moves.append((new_x, y + direction))
                 elif color == 'black' and self.board[y_idx + direction, x_idx + dx] > 0:
                     moves.append((new_x, y + direction))
-        
+
+        # En passant
+        if self.en_passant_target:
+            en_passant_x, en_passant_y = self.en_passant_target
+            if abs(ord(x) - ord(en_passant_x)) == 1 and ((color == 'white' and y == 5) or (color == 'black' and y == 4)):
+                moves.append((en_passant_x, en_passant_y + (1 if color == 'white' else -1)))
+
         return moves
     
     def get_knight_moves(self, x, y):
@@ -227,7 +235,16 @@ class ChessEngine:
         return moves
 
     def make_move(self, from_x, from_y, to_x, to_y):
+        # Capture the piece at the destination (if any)
+        captured_piece = self.board[to_y-1, ord(to_x)-ord('a')]
+        
+        # Move the piece
         piece = self.board[from_y-1, ord(from_x)-ord('a')]
+        color = 'white' if piece > 0 else 'black'
+        
+        # Record the move in history (include en passant info)
+        self.move_history.append((from_x, from_y, to_x, to_y, captured_piece, self.en_passant_target))
+        
         self.board[to_y-1, ord(to_x)-ord('a')] = piece
         self.board[from_y-1, ord(from_x)-ord('a')] = 0
 
@@ -257,3 +274,205 @@ class ChessEngine:
                     self.white_rooks_moved[1] = True
                 else:
                     self.black_rooks_moved[1] = True
+
+        # Handle pawn promotion
+        if abs(piece) == 1 and (to_y == 8 or to_y == 1):
+            self.board[to_y-1, ord(to_x)-ord('a')] = 5 if piece > 0 else -5  # Promote to queen
+
+        # Handle en passant
+        if abs(piece) == 1 and abs(from_y - to_y) == 2:
+            self.en_passant_target = (to_x, (from_y + to_y) // 2)
+        elif abs(piece) == 1 and to_x != from_x and captured_piece == 0:
+            # En passant capture
+            captured_pawn_y = to_y - 1 if color == 'white' else to_y + 1
+            self.board[captured_pawn_y-1, ord(to_x)-ord('a')] = 0
+        else:
+            self.en_passant_target = None
+
+        # Clear en passant target after any non-pawn move or non-double-step pawn move
+        if abs(piece) != 1 or abs(from_y - to_y) != 2:
+            self.en_passant_target = None
+
+    
+    def evaluate_board(self):
+        # Function to evaluate board state.
+        # To be used by minmax algo to assess pos.
+        if self.is_checkmate('white'):
+            return -float('int')
+        if self.is_checkmate('black'):
+            return float('int')
+        
+        value = 0
+        piece_values = {1: 100, 2: 320, 3: 330, 4: 500, 5: 900, 6: 20000}
+        
+        for y in range(8):
+            for x in range(8):
+                piece = self.board[y, x]
+                if piece != 0:
+                    # Add or subtract piece value
+                    value += piece_values[abs(piece)] * (1 if piece > 0 else -1)
+                    
+                    # Bonus for central control (simplified)
+                    if 2 <= x <= 5 and 2 <= y <= 5:
+                        value += 10 * (1 if piece > 0 else -1)
+        
+        return value
+    
+    def is_checkmate(self, color):
+        # First, check if the king is in check
+        if not self.is_in_check(color):
+            return False
+        
+        # If in check, see if there are any legal moves that get out of check
+        for y in range(8):
+            for x in range(8):
+                piece = self.board[y, x]
+                if (piece > 0 and color == 'white') or (piece < 0 and color == 'black'):
+                    moves = self.get_moves(chr(ord('a') + x), y + 1)
+                    for move in moves:
+                        # Make the move
+                        captured_piece = self.board[move[1]-1, ord(move[0])-ord('a')]
+                        self.make_move(chr(ord('a') + x), y + 1, move[0], move[1])
+                        
+                        # Check if still in check
+                        still_in_check = self.is_in_check(color)
+                        
+                        # Undo the move
+                        self.undo_move()
+                        
+                        # If this move gets out of check, it's not checkmate
+                        if not still_in_check:
+                            return False
+    
+        # If we've checked all moves and none get out of check, it's checkmate
+        return True
+
+    def is_in_check(self, color):
+        # Find the king
+        king_pos = None
+        king_value = 6 if color == 'white' else -6
+        for y in range(8):
+            for x in range(8):
+                if self.board[y, x] == king_value:
+                    king_pos = (x, y)
+                    break
+            if king_pos:
+                break
+        
+        if not king_pos:
+            return False  # This shouldn't happen in a valid game state
+        
+        # Check if any opponent's piece can attack the king
+        opponent_color = 'black' if color == 'white' else 'white'
+        for y in range(8):
+            for x in range(8):
+                piece = self.board[y, x]
+                if (piece < 0 and opponent_color == 'black') or (piece > 0 and opponent_color == 'white'):
+                    moves = self.get_moves(chr(ord('a') + x), y + 1)
+                    if (chr(ord('a') + king_pos[0]), king_pos[1] + 1) in moves:
+                        return True
+        
+        return False
+    
+    def minimax(self, depth, alpha, beta, maximizing_player):
+        if depth == 0:
+            return self.evaluate_board()
+        
+        if maximizing_player:
+            max_eval = -float('inf')
+            for move in self.get_all_moves('white'):
+                self.make_move(*move)
+                eval = self.minimax(depth - 1, alpha, beta, False)
+                self.undo_move()  # You'll need to implement this
+                max_eval = max(max_eval, eval)
+                alpha = max(alpha, eval)
+                if beta <= alpha:
+                    break
+            return max_eval
+        else:
+            min_eval = float('inf')
+            for move in self.get_all_moves('black'):
+                self.make_move(*move)
+                eval = self.minimax(depth - 1, alpha, beta, True)
+                self.undo_move()  # You'll need to implement this
+                min_eval = min(min_eval, eval)
+                beta = min(beta, eval)
+                if beta <= alpha:
+                    break
+            return min_eval
+
+    def get_all_moves(self, color):
+        moves = []
+        for y in range(8):
+            for x in range(8):
+                piece = self.board[y, x]
+                if (piece > 0 and color == 'white') or (piece < 0 and color == 'black'):
+                    for move in self.get_moves(chr(ord('a') + x), y + 1):
+                        moves.append((chr(ord('a') + x), y + 1, move[0], move[1]))
+        return moves
+
+    def choose_best_move(self, color, depth):
+        best_move = None
+        best_eval = -float('inf') if color == 'white' else float('inf')
+        
+        for move in self.get_all_moves(color):
+            self.make_move(*move)
+            eval = self.minimax(depth - 1, -float('inf'), float('inf'), color == 'black')
+            self.undo_move()  # You'll need to implement this
+            
+            if color == 'white' and eval > best_eval:
+                best_eval = eval
+                best_move = move
+            elif color == 'black' and eval < best_eval:
+                best_eval = eval
+                best_move = move
+        
+        return best_move
+    
+    def undo_move(self):
+        if not self.move_history:
+            return
+        last_move = self.move_history.pop()
+        from_x, from_y, to_x, to_y, captured_piece, old_en_passant_target = last_move
+        
+        # Restore the moved piece
+        self.board[from_y-1, ord(from_x)-ord('a')] = self.board[to_y-1, ord(to_x)-ord('a')]
+        # Restore the captured piece (if any)
+        self.board[to_y-1, ord(to_x)-ord('a')] = captured_piece
+        
+        # Restore the old en passant target
+        self.en_passant_target = old_en_passant_target
+
+        # Undo castling if it was a castling move
+        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 6 and abs(ord(to_x) - ord(from_x)) == 2:
+            if to_x == 'g':  # Kingside
+                self.undo_move()  # Undo rook move
+            elif to_x == 'c':  # Queenside
+                self.undo_move()  # Undo rook move
+
+        # Reset king and rook move flags if necessary
+        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 6:  # King
+            if self.board[from_y-1, ord(from_x)-ord('a')] > 0:
+                self.white_king_moved = False
+            else:
+                self.black_king_moved = False
+        elif abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 4:  # Rook
+            if from_x == 'a':  # Queenside
+                if self.board[from_y-1, ord(from_x)-ord('a')] > 0:
+                    self.white_rooks_moved[0] = False
+                else:
+                    self.black_rooks_moved[0] = False
+            elif from_x == 'h':  # Kingside
+                if self.board[from_y-1, ord(from_x)-ord('a')] > 0:
+                    self.white_rooks_moved[1] = False
+                else:
+                    self.black_rooks_moved[1] = False
+
+        # Undo en passant capture
+        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 1 and to_x != from_x and captured_piece == 0:
+            captured_pawn_y = from_y if self.board[from_y-1, ord(from_x)-ord('a')] > 0 else from_y - 2
+            self.board[captured_pawn_y-1, ord(to_x)-ord('a')] = -1 if self.board[from_y-1, ord(from_x)-ord('a')] > 0 else 1
+
+        # Undo pawn promotion
+        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 5 and abs(captured_piece) == 1:
+            self.board[from_y-1, ord(from_x)-ord('a')] = captured_piece
